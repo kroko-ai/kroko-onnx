@@ -151,19 +151,38 @@ std::unordered_map<std::string, int32_t> ReadTokens(
   return token2id;
 }
 
-SymbolTable::SymbolTable(const std::string& unused, bool is_file) {
-    // Ignore parameters; use tokens from ModelData singleton
+SymbolTable::SymbolTable(const std::string& filename, bool is_file) {
+#ifdef KROKO_MODEL
+    // Banafo archive — tokens are embedded in the encrypted .data and
+    // loaded via the ModelData singleton; the filename argument is unused.
     auto& model = ModelData::getInstance();
     std::istringstream iss(model.tokens);
     Init(iss);
+#else
+    // Standard sherpa-onnx behavior: read tokens from a path on disk
+    // (or, when is_file is false, treat `filename` as inline content).
+    if (is_file) {
+      std::ifstream is(filename);
+      Init(is);
+    } else {
+      std::istringstream iss(filename);
+      Init(iss);
+    }
+#endif
 }
 
 template <typename Manager>
 SymbolTable::SymbolTable(Manager *mgr, const std::string &filename) {
-  // Ignore parameters; use tokens from ModelData singleton
+#ifdef KROKO_MODEL
     auto& model = ModelData::getInstance();
     std::istringstream iss(model.tokens);
-    Init(iss); 
+    Init(iss);
+#else
+    // Android/iOS asset manager path — load tokens via the manager.
+    auto buf = ReadFile(mgr, filename);
+    std::istringstream iss(std::string{buf.begin(), buf.end()});
+    Init(iss);
+#endif
 }
 
 void SymbolTable::Init(std::istream &is) {
