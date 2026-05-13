@@ -187,18 +187,33 @@ static ModelType GetModelType(char *model_data, size_t model_data_length,
 
 std::unique_ptr<OnlineTransducerModel> OnlineTransducerModel::Create(
     const OnlineModelConfig &config) {
-#ifdef KROKO_MODEL      
-  BanafoLoadModel(config);
-  auto& model = ModelData::getInstance();
-#endif
-
-#ifdef KROKO_MODEL
-  {
+  // Runtime dispatch between Banafo (Kroko commercial .data) and the
+  // standard sherpa-onnx file-based loader. Only invoke the Banafo
+  // loader when a model_path was actually configured for this recognizer;
+  // OSS configs (transducer.encoder/decoder/joiner) must NOT touch the
+  // ModelData singleton, otherwise mixed Kroko+OSS deployments break.
+  const bool use_banafo = !config.model_path.empty();
+  if (use_banafo) {
+    BanafoLoadModel(config);
+    auto &model = ModelData::getInstance();
     const auto &model_type = model.getHeaderValue("type");
-#else
-  if (!config.model_type.empty()) {
+    if (model_type == "conformer") {
+      return std::make_unique<OnlineConformerTransducerModel>(config);
+    } else if (model_type == "ebranchformer") {
+      return std::make_unique<OnlineEbranchformerTransducerModel>(config);
+    } else if (model_type == "lstm") {
+      return std::make_unique<OnlineLstmTransducerModel>(config);
+    } else if (model_type == "zipformer") {
+      return std::make_unique<OnlineZipformerTransducerModel>(config);
+    } else if (model_type == "zipformer2") {
+      return std::make_unique<OnlineZipformer2TransducerModel>(config);
+    } else {
+      SHERPA_ONNX_LOGE(
+          "Invalid model_type from Banafo header: %s",
+          model_type.c_str());
+    }
+  } else if (!config.model_type.empty()) {
     const auto &model_type = config.model_type;
-#endif    
     if (model_type == "conformer") {
       return std::make_unique<OnlineConformerTransducerModel>(config);
     } else if (model_type == "ebranchformer") {
@@ -280,9 +295,10 @@ Ort::Value OnlineTransducerModel::BuildDecoderInput(
 template <typename Manager>
 std::unique_ptr<OnlineTransducerModel> OnlineTransducerModel::Create(
     Manager *mgr, const OnlineModelConfig &config) {
-#ifdef KROKO_MODEL      
-  BanafoLoadModel(config);
-#endif
+  // Runtime dispatch (see Create(config) above for the non-Manager path).
+  if (!config.model_path.empty()) {
+    BanafoLoadModel(config);
+  }
 
   if (!config.model_type.empty()) {
     const auto &model_type = config.model_type;
