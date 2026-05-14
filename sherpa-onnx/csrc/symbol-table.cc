@@ -151,19 +151,38 @@ std::unordered_map<std::string, int32_t> ReadTokens(
   return token2id;
 }
 
-SymbolTable::SymbolTable(const std::string& unused, bool is_file) {
-    // Ignore parameters; use tokens from ModelData singleton
-    auto& model = ModelData::getInstance();
-    std::istringstream iss(model.tokens);
-    Init(iss);
+SymbolTable::SymbolTable(const std::string& filename, bool is_file) {
+    // Runtime dispatch: when no filename was provided, fall back to the
+    // ModelData singleton (Banafo archive populated by BanafoLoadModel).
+    // When a filename is provided, do the standard sherpa-onnx load —
+    // either from disk (is_file) or treat the argument as inline content.
+    // This lets a single binary load a mix of Kroko (.data) and OSS
+    // (tokens.txt) languages in the same process.
+    if (filename.empty()) {
+      auto& model = ModelData::getInstance();
+      std::istringstream iss(model.tokens);
+      Init(iss);
+    } else if (is_file) {
+      std::ifstream is(filename);
+      Init(is);
+    } else {
+      std::istringstream iss(filename);
+      Init(iss);
+    }
 }
 
 template <typename Manager>
 SymbolTable::SymbolTable(Manager *mgr, const std::string &filename) {
-  // Ignore parameters; use tokens from ModelData singleton
-    auto& model = ModelData::getInstance();
-    std::istringstream iss(model.tokens);
-    Init(iss); 
+    if (filename.empty()) {
+      auto& model = ModelData::getInstance();
+      std::istringstream iss(model.tokens);
+      Init(iss);
+    } else {
+      // Android/iOS asset manager path — load tokens via the manager.
+      auto buf = ReadFile(mgr, filename);
+      std::istringstream iss(std::string{buf.begin(), buf.end()});
+      Init(iss);
+    }
 }
 
 void SymbolTable::Init(std::istream &is) {

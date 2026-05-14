@@ -44,34 +44,34 @@ OnlineZipformer2TransducerModel::OnlineZipformer2TransducerModel(
       joiner_sess_opts_(GetSessionOptions(config, "joiner")),
       config_(config),
       allocator_{} {
-  {
-#ifdef KROKO_MODEL
+  // Runtime dispatch: non-empty model_path means a Banafo .data archive
+  // was loaded by BanafoLoadModel and the ModelData singleton has the
+  // encoder/decoder/joiner bytes. Empty model_path means OSS — read the
+  // ONNX files from the paths in config.transducer.{encoder,decoder,joiner}.
+  const bool from_banafo = !config.model_path.empty();
+
+  if (from_banafo) {
     auto& model = ModelData::getInstance();
     InitEncoder(model.encoder.data(), model.encoder.size());
-#else      
+  } else {
     auto buf = ReadFile(config.transducer.encoder);
     InitEncoder(buf.data(), buf.size());
-#endif
   }
 
-  {
-#ifdef KROKO_MODEL      
+  if (from_banafo) {
     auto& model = ModelData::getInstance();
     InitDecoder(model.decoder.data(), model.decoder.size());
-#else
+  } else {
     auto buf = ReadFile(config.transducer.decoder);
     InitDecoder(buf.data(), buf.size());
-#endif
   }
 
-  {
-#ifdef KROKO_MODEL      
+  if (from_banafo) {
     auto& model = ModelData::getInstance();
     InitJoiner(model.joiner.data(), model.joiner.size());
-#else
+  } else {
     auto buf = ReadFile(config.transducer.joiner);
     InitJoiner(buf.data(), buf.size());
-#endif
   }
 }
 
