@@ -106,7 +106,117 @@ KROKO_LICENSE=ON pip install .
 
 After installation, you can use the `kroko-onnx` Python package.
 
-> 🛠️ Windows and macOS build instructions coming soon!
+---
+
+### macOS (Apple Silicon)
+
+Native arm64 wheel build — no Docker, no cross-compile. Tested on Apple Silicon
+(M-series); Intel Macs should work with the same script as long as Homebrew is
+installed in `/usr/local`.
+
+```bash
+git clone https://github.com/kroko-ai/kroko-onnx
+cd kroko-onnx
+
+# Build both pro + free variants (default)
+./build_macos.sh
+
+# Or pick one
+./build_macos.sh --variant pro
+./build_macos.sh --variant free
+```
+
+The script auto-installs the build dependencies it needs via Homebrew:
+`cmake`, `ninja`, `openssl@3`, `python@3.11`. Python tooling (`pybind11`,
+`wheel`, `delocate`) is installed into a venv at `/tmp/kroko-onnx-macos-build/venv`.
+
+#### Outputs
+
+```
+release_artifacts/macos/
+├── kroko_onnx-<version>-1pro-cp311-cp311-macosx_<host>_arm64.whl
+└── kroko_onnx-<version>-1free-cp311-cp311-macosx_<host>_arm64.whl
+```
+
+The wheel bundles all non-system dylibs (OpenSSL, onnxruntime) into
+`kroko_onnx/.dylibs/` via `delocate-wheel`, so `pip install` works standalone.
+
+> ⚠️ **Deployment target note:** the wheel's `macosx_<host>_arm64` tag matches
+> the running macOS version because Homebrew's `openssl@3` dylibs are built
+> against the host SDK. For a wheel that installs on older macOS releases,
+> run the build on the oldest macOS you support (or use cibuildwheel +
+> GitHub Actions macOS runners). No installer is produced on macOS — only the
+> Python wheel.
+
+---
+
+### Windows (x86_64)
+
+Windows builds are cross-compiled from a Docker image — no Windows machine required.
+A single command produces both the **NSIS installer** (`.exe`) and the **Python wheel**
+(`.whl`), and supports two variants:
+
+- **`pro`** — `KROKO_LICENSE=ON`, links OpenSSL (`libssl-3-x64.dll` + `libcrypto-3-x64.dll`).
+  Use this for paid/licensed Kroko models.
+- **`free`** — `KROKO_LICENSE=OFF`, no license/metrics code, no OpenSSL dependency.
+  Use this for the open-source / community workflow.
+
+#### From Linux or macOS (Docker)
+
+```bash
+git clone https://github.com/kroko-ai/kroko-onnx
+cd kroko-onnx
+
+# Build both pro + free variants (default)
+./build_windows.sh
+
+# Or pick a single variant
+./build_windows.sh --variant pro
+./build_windows.sh --variant free
+```
+
+Requires Docker (or Docker Desktop) with the `linux/amd64` platform available.
+The first run pulls the build image and warms the FetchContent cache for openfst /
+onnxruntime; subsequent runs are much faster.
+
+#### From a Windows host (Docker Desktop)
+
+A `.bat` port of the same script:
+
+```bat
+git clone https://github.com/kroko-ai/kroko-onnx
+cd kroko-onnx
+
+build_windows.bat
+build_windows.bat --variant pro
+build_windows.bat --variant free
+```
+
+Requires Docker Desktop (WSL2 backend) and PowerShell 5+ (ships with Windows 10/11).
+
+#### Outputs
+
+```
+release_artifacts/windows/
+├── kroko-onnx-websocket-server-<version>-pro-setup.exe        # NSIS installer (pro)
+├── kroko-onnx-websocket-server-<version>-free-setup.exe       # NSIS installer (free)
+├── kroko_onnx-<version>-1pro-cp312-cp312-win_amd64.whl        # Python wheel (pro)
+├── kroko_onnx-<version>-1free-cp312-cp312-win_amd64.whl       # Python wheel (free)
+├── bin-pro/                                                    # raw artefacts (pro)
+└── bin-free/                                                   # raw artefacts (free)
+```
+
+The installer ships the websocket-server `.exe` plus every runtime DLL it needs and
+chain-installs Microsoft's Visual C++ Redistributable. The wheel bundles all
+runtime DLLs via `delvewheel`, so `pip install kroko_onnx-*.whl` works standalone.
+
+The two wheel filenames carry different PEP 425 build tags (`1pro` / `1free`) so
+they can sit side-by-side on disk without colliding; install whichever variant you
+need:
+
+```bat
+pip install kroko_onnx-<version>-1pro-cp312-cp312-win_amd64.whl
+```
 
 ---
 

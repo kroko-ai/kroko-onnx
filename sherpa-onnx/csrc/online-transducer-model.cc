@@ -14,9 +14,11 @@
 #endif
 
 #include <algorithm>
+#include <chrono>
 #include <memory>
 #include <sstream>
 #include <string>
+#include <thread>
 
 #include "sherpa-onnx/csrc/file-utils.h"
 #include "sherpa-onnx/csrc/macros.h"
@@ -56,7 +58,7 @@ void* check_license(void* ptr) {
     LicenseClient& client = LicenseState::getInstance();
 
     while (true) {
-        sleep(client.report_interval);
+        std::this_thread::sleep_for(std::chrono::seconds(client.report_interval));
         uint64_t duration = sherpa_onnx::total_duration / 1000;
 
         // Ensure we don’t overuse the license
@@ -94,20 +96,17 @@ void BanafoLoadModel(const OnlineModelConfig &config) {
 
     if(model.getHeaderValue("free") == "false") {
       auto& banafo = BanafoLicense::getInstance(config.key, model.getHeaderValue("id"), config.referralcode);
-      pthread_t license_th;
-      int license;
 
       while(!banafo.mActivationFinished)
       {
-        sleep(1);
+        std::this_thread::sleep_for(std::chrono::seconds(1));
       }
       if(!banafo.mActivated) {
         exit(1);
       }
 
       sherpa_onnx::license_status = true;
-      license = pthread_create(&license_th, NULL, check_license, NULL);
-      pthread_detach(license);
+      std::thread(check_license, nullptr).detach();
 
       auto& client = LicenseState::getInstance();
     

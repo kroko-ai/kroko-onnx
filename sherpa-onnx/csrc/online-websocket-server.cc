@@ -2,6 +2,9 @@
 //
 // Copyright (c)  2022-2023  Xiaomi Corporation
 
+#include <chrono>
+#include <thread>
+
 #include "asio.hpp"
 #include "sherpa-onnx/csrc/macros.h"
 #include "sherpa-onnx/csrc/online-websocket-server-impl.h"
@@ -80,7 +83,7 @@ void* http_thread(void* ptr) {
       }
     });
 
-    sleep(5);
+    std::this_thread::sleep_for(std::chrono::seconds(5));
     svr.listen("0.0.0.0", *(int32_t*)ptr);
   } catch(std::exception& e)
   {
@@ -154,7 +157,14 @@ int32_t main(int32_t argc, char *argv[]) {
 
   config.Validate();
 
-  pthread_t http_th;
+#ifdef KROKO_LICENSE
+  // std::thread instead of pthread_t — portable across glibc / MSVC,
+  // and the original `http_th = pthread_create(&http_th, ...)` was a
+  // type-confusion bug anyway (stored the int return code into the
+  // pthread_t slot, then joined to "0"). Scoped to KROKO_LICENSE
+  // because http_thread itself is gated behind the same flag.
+  std::thread http_th;
+#endif
   asio::io_context io_conn;  // for network connections
   asio::io_context io_work;  // for neural network and decoding
 
@@ -165,11 +175,11 @@ int32_t main(int32_t argc, char *argv[]) {
   SHERPA_ONNX_LOGE("Listening on: %d", port);
   SHERPA_ONNX_LOGE("Number of work threads: %d", num_work_threads);
 
-#ifdef KROKO_LICENSE 
+#ifdef KROKO_LICENSE
   if(metrics_port > 0) {
-    http_th = pthread_create(&http_th, NULL, http_thread, &metrics_port);
+    http_th = std::thread(http_thread, &metrics_port);
   }
-#endif  
+#endif
 
   // give some work to do for the io_work pool
   auto work_guard = asio::make_work_guard(io_work);
@@ -196,11 +206,11 @@ int32_t main(int32_t argc, char *argv[]) {
     t.join();
   }
 
-#ifdef KROKO_LICENSE 
-  if(metrics_port > 0) {
-    pthread_join(http_th, NULL);
+#ifdef KROKO_LICENSE
+  if(metrics_port > 0 && http_th.joinable()) {
+    http_th.join();
   }
-#endif  
+#endif
 
   return 0;
 }

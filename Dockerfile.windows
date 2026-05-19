@@ -1,0 +1,207 @@
+# =============================================================================
+# Linux → Windows cross-compile image for kroko-onnx-online-websocket-server.
+# =============================================================================
+#
+# Modelled on voice-scribe's Dockerfile.windows_new — same Ubuntu 24.04 base,
+# same clang-19 + lld-link + xwin SDK pattern. The voice-scribe image uses
+# cargo-xwin (Rust integration); this one uses the standalone xwin tool and a
+# CMake toolchain file (cmake/toolchain-windows-clang.cmake) to drive a pure
+# C++ CMake build instead.
+#
+# Output of `docker run`:
+#   /out/bin/kroko-onnx-online-websocket-server.exe
+#   /out/bin/sherpa-onnx-c-api.dll
+#   /out/bin/sherpa-onnx-cxx-api.dll
+#   /out/bin/onnxruntime.dll
+#   (plus any other DLLs the CMake install step puts in bin/)
+# These get bundled into the NSIS installer by build_windows.sh outside the
+# container.
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Pinned versions so reproducible across reruns. Bump deliberately.
+ARG CLANG_VERSION=19
+ARG XWIN_VERSION=0.6.5
+ARG CMAKE_VERSION=3.30.5
+ARG NSIS_VERSION=3.10
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    wget \
+    file \
+    pkg-config \
+    git \
+    ca-certificates \
+    clang-${CLANG_VERSION} \
+    libclang-${CLANG_VERSION}-dev \
+    lld-${CLANG_VERSION} \
+    llvm-${CLANG_VERSION} \
+    ninja-build \
+    unzip \
+    cabextract \
+    p7zip-full \
+    nsis \
+    `# Linux Python drives setup.py / bdist_wheel / delvewheel. The actual` \
+    `# .pyd binary is produced by clang-cl from the Windows Python headers` \
+    `# below — Linux Python just orchestrates the build + packaging.` \
+    python3 \
+    python3-pip \
+    python3-venv \
+ && rm -rf /var/lib/apt/lists/* \
+ && pip3 install --break-system-packages \
+        setuptools wheel delvewheel
+
+# Modern CMake (Ubuntu's apt CMake is fine but sherpa-onnx pulls in deps that
+# benefit from a recent FetchContent). Static binary from Kitware mirror.
+RUN curl -sLo /tmp/cmake.tar.gz \
+    "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz" \
+ && tar -xzf /tmp/cmake.tar.gz -C /opt \
+ && ln -sf /opt/cmake-${CMAKE_VERSION}-linux-x86_64/bin/cmake /usr/local/bin/cmake \
+ && ln -sf /opt/cmake-${CMAKE_VERSION}-linux-x86_64/bin/ctest /usr/local/bin/ctest \
+ && rm /tmp/cmake.tar.gz
+
+# Clang-19 symlinks identical to voice-scribe's pattern so the same toolchain
+# file works without per-version drift.
+RUN ln -sf /usr/bin/clang-${CLANG_VERSION}    /usr/bin/clang \
+ && ln -sf /usr/bin/clang++-${CLANG_VERSION}  /usr/bin/clang++ \
+ && ln -sf /usr/bin/clang-${CLANG_VERSION}    /usr/bin/clang-cl \
+ && ln -sf /usr/bin/lld-link-${CLANG_VERSION} /usr/bin/lld-link \
+ && ln -sf /usr/bin/llvm-lib-${CLANG_VERSION} /usr/bin/llvm-lib \
+ && ln -sf /usr/bin/llvm-ar-${CLANG_VERSION}  /usr/bin/llvm-ar \
+ && ln -sf /usr/bin/llvm-rc-${CLANG_VERSION}  /usr/bin/llvm-rc
+
+# Microsoft SDK + CRT via xwin (prebuilt binary release). This populates
+# /opt/xwin/{crt,sdk} with headers and import libraries that clang's
+# -msvc target needs. Identical purpose to voice-scribe's `cargo xwin build`
+# warm-up step — same SDK end product, different driver.
+RUN cd /tmp \
+ && curl -sLo xwin.tar.gz \
+    "https://github.com/Jake-Shadle/xwin/releases/download/${XWIN_VERSION}/xwin-${XWIN_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+ && tar -xzf xwin.tar.gz \
+ && mv xwin-${XWIN_VERSION}-x86_64-unknown-linux-musl/xwin /usr/local/bin/xwin \
+ && rm -rf xwin.tar.gz xwin-${XWIN_VERSION}-x86_64-unknown-linux-musl \
+ && xwin --accept-license --arch x86_64 splat --output /opt/xwin \
+ && ls /opt/xwin/sdk/include/um/Windows.h
+
+# Cache Microsoft's VC++ Redistributable installer. NSIS chain-installs it
+# silently on the target machine before launching the server (see
+# installer/kroko-onnx-websocket-server.nsi). We DON'T try to extract DLLs
+# from it — modern vc_redist.x64.exe is a WiX/Burn bundle that wraps an
+# embedded MSI, and 7z / cabextract can't reach the DLLs without running
+# the bundle in Wine. The chain-install pattern is the standard MS-blessed
+# approach (this is what every official MSVC-linked installer does) and
+# avoids fighting an undocumented extraction format.
+RUN mkdir -p /opt/vc_redist \
+ && curl -sL https://aka.ms/vs/17/release/vc_redist.x64.exe \
+        -o /opt/vc_redist/vc_redist.x64.exe \
+ && ls -lh /opt/vc_redist/vc_redist.x64.exe
+
+ENV XWIN_DIR=/opt/xwin
+
+# Windows CPython target — headers (Python.h, etc.) and python3XX.lib
+# import library. CMake's find_package(Python) needs both to build the
+# _sherpa_onnx.pyd extension that goes into the wheel.
+#
+# IMPORTANT: pin to the SAME Python minor version as the host Linux
+# python3 (Ubuntu 24.04 → 3.12). pybind11's modern find_package(Python
+# COMPONENTS Interpreter Development.Module) demands interpreter +
+# headers + lib all share a version; using e.g. host 3.12 + Windows
+# 3.10 fails the integrity check even though clang-cl can technically
+# build against either. Bump host + target together when bumping
+# Ubuntu base.
+#
+# NuGet "python" package is a clean zip with tools/include/{Python.h,...}
+# and tools/libs/python3XX.lib — much simpler than dealing with the
+# official python.org installer's WiX bundle.
+ARG PYTHON_TARGET_VERSION=3.12.7
+ARG PYTHON_TAG=312
+RUN mkdir -p /opt/python-win64 \
+ && cd /tmp \
+ && curl -sLf "https://www.nuget.org/api/v2/package/python/${PYTHON_TARGET_VERSION}" \
+        -o python.nupkg \
+ && 7z x -y -o/opt/python-win64 python.nupkg >/dev/null \
+ && test -f /opt/python-win64/tools/include/Python.h \
+ && test -f "/opt/python-win64/tools/libs/python${PYTHON_TAG}.lib" \
+ && rm -f /tmp/python.nupkg
+
+ENV PYTHON_WIN_INCLUDE=/opt/python-win64/tools/include
+ENV PYTHON_WIN_LIB=/opt/python-win64/tools/libs/python312.lib
+ENV PYTHON_WIN_TAG=cp312
+
+# Sherpa-onnx's cmake/show-info.cmake assumes target=Windows means host has
+# wmic, which doesn't exist on Linux. Drop a tiny shim that prints the same
+# two-line "Caption\nValue" format the CMake script's REPLACE expects so
+# configure doesn't bail with "string sub-command REPLACE requires at least
+# four arguments". Values are cosmetic — only used for a STATUS message.
+RUN printf '#!/bin/sh\necho "Caption                          Version"\necho "Microsoft Windows (cross-compile)  0.0.0"\n' \
+        > /usr/local/bin/wmic \
+ && chmod +x /usr/local/bin/wmic
+
+# Windows-native OpenSSL — required by sherpa-onnx's CMakeLists when
+# SHERPA_ONNX_ENABLE_WEBSOCKET=ON (websocketpp uses it for wss:// support
+# and the link is unconditional). Pulled from slproweb.com's MSI build of
+# OpenSSL — same source voice-scribe uses. msiextract → 7z chain
+# unpacks the per-arch DLL + import library + headers into
+# /opt/openssl-win64/app/{bin,lib,include}, matching the layout
+# CMake's FindOpenSSL expects when given OPENSSL_ROOT_DIR.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        msitools innoextract \
+ && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p /tmp/openssl-msi /opt/openssl-win64/app/bin \
+        /opt/openssl-win64/app/lib /opt/openssl-win64/app/include \
+ && cd /tmp \
+ `# slproweb rotates patch versions aggressively (only the latest few` \
+ `# are kept under /download). Try a small fallback list from newest to` \
+ `# slightly older so a missing pinned version doesn't break the image` \
+ `# build. Bump the list when you need a newer one.` \
+ && for v in 3_6_2 3_6_1 3_5_4 3_5_3; do \
+        if curl -sLf "https://slproweb.com/download/Win64OpenSSL-${v}.msi" \
+                -o openssl.msi; then \
+            echo "Downloaded Win64OpenSSL-${v}.msi"; \
+            break; \
+        fi; \
+        rm -f openssl.msi; \
+    done \
+ && test -s openssl.msi \
+ && msiextract -C /tmp/openssl-msi openssl.msi \
+ && mkdir -p /tmp/openssl-final \
+ && (find /tmp/openssl-msi -name "*.exe" \
+        -exec innoextract -d /tmp/openssl-final {} + 2>/dev/null \
+     || find /tmp/openssl-msi -name "*.exe" \
+        -exec 7z x -o/tmp/openssl-final {} \;) \
+ && (cp -r /tmp/openssl-final/app/* /opt/openssl-win64/app/ 2>/dev/null \
+     || (find /tmp/openssl-final -name "libcrypto*.dll" \
+            -exec cp -v {} /opt/openssl-win64/app/bin/ \; ; \
+         find /tmp/openssl-final -name "libssl*.dll" \
+            -exec cp -v {} /opt/openssl-win64/app/bin/ \; ; \
+         find /tmp/openssl-final -name "libcrypto.lib" \
+            -exec cp -v {} /opt/openssl-win64/app/lib/ \; ; \
+         find /tmp/openssl-final -name "libssl.lib" \
+            -exec cp -v {} /opt/openssl-win64/app/lib/ \; ; \
+         find /tmp/openssl-final -type d -name "include" \
+            -exec cp -r {} /opt/openssl-win64/app/ \;)) \
+ && (test -d /opt/openssl-win64/app/lib/VC/x64/MT \
+     && mv /opt/openssl-win64/app/lib/VC/x64/MT/* /opt/openssl-win64/app/lib/ \
+     || true) \
+ && test -f /opt/openssl-win64/app/lib/libcrypto.lib \
+        -o -f /opt/openssl-win64/app/lib/libcrypto_static.lib \
+ && rm -rf /tmp/openssl-msi /tmp/openssl-final /tmp/openssl.msi
+
+ENV OPENSSL_ROOT_DIR=/opt/openssl-win64/app
+ENV OPENSSL_DIR=/opt/openssl-win64/app
+ENV OPENSSL_LIB_DIR=/opt/openssl-win64/app/lib
+ENV OPENSSL_INCLUDE_DIR=/opt/openssl-win64/app/include
+ENV OPENSSL_CRYPTO_LIBRARY=/opt/openssl-win64/app/lib/libcrypto.lib
+ENV OPENSSL_SSL_LIBRARY=/opt/openssl-win64/app/lib/libssl.lib
+
+WORKDIR /src
+
+# The build script (build_windows.sh) mounts the kroko-onnx checkout at /src
+# and invokes the entrypoint. Keep the image lean — no source copied at
+# image build time so the image cache stays valid across local code edits.
+COPY in_windows_container.sh /usr/local/bin/in_windows_container.sh
+RUN chmod +x /usr/local/bin/in_windows_container.sh
+ENTRYPOINT ["/usr/local/bin/in_windows_container.sh"]

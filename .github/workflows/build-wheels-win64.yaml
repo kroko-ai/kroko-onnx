@@ -40,18 +40,54 @@ jobs:
       - name: Build wheels
         shell: bash
         run: |
-          pip install setuptools wheel
+          pip install setuptools wheel delvewheel
 
           python3 setup.py bdist_wheel
 
           ls -lh ./dist/
 
-          mv dist wheelhouse
+      # delvewheel = the Windows analogue of auditwheel. It walks the
+      # wheel's embedded .pyd / .exe / .dll files, finds every transitive
+      # native DLL they import (onnxruntime.dll, sherpa-onnx-c-api.dll,
+      # vcruntime140.dll, anything CMake produced that wasn't already
+      # listed in cmake_extension.py's get_binaries()), and copies them
+      # into a private kroko_onnx.libs/ directory inside the wheel — then
+      # patches the wheel's loader so pip install lands them where Windows
+      # can find them at runtime. Without this step the wheel can install
+      # OK but fail at first import or first `kroko-onnx-online-websocket-
+      # server.exe` invocation with "library not found".
+      #
+      # --add-path tells delvewheel where to look for DLLs that aren't
+      # already on the system PATH — the CMake build drops everything in
+      # build/<...>/sherpa_onnx/bin during setup.py bdist_wheel. Use
+      # `find` so we don't hardcode the build temp dir's Python-version
+      # suffix.
+      - name: Repair wheel (bundle native DLLs)
+        shell: bash
+        run: |
+          mkdir -p wheelhouse
+          # Collect every CMake-produced "bin" dir under build/ as a search
+          # path. delvewheel accepts ; as separator on Windows.
+          DLL_PATHS=$(find build -type d -name bin 2>/dev/null \
+              | tr '\n' ';' | sed 's/;$//')
+          echo "delvewheel --add-path: $DLL_PATHS"
+          for whl in dist/*.whl; do
+            python -m delvewheel repair \
+              --add-path "$DLL_PATHS" \
+              --wheel-dir wheelhouse \
+              "$whl"
+          done
+          ls -lh wheelhouse/
 
       - name: Display wheels
         shell: bash
         run: |
           ls -lh ./wheelhouse/
+          echo "---"
+          echo "Inspecting bundled DLLs in the repaired wheel:"
+          # unzip the first wheel and list its DLL payload so the CI log
+          # makes it obvious that onnxruntime + sherpa DLLs are in there.
+          python -m zipfile -l ./wheelhouse/*.whl | grep -iE '\.(dll|pyd|exe)$' || true
 
       - uses: actions/upload-artifact@v4
         with:
