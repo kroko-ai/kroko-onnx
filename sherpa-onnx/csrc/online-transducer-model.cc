@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
 
@@ -56,7 +57,11 @@ void* check_license(void* ptr) {
     LicenseClient& client = LicenseState::getInstance();
 
     while (true) {
-        sleep(client.report_interval);
+        // Guard against a missing/zero report_interval from the license
+        // server, which would otherwise turn sleep(0) into a tight loop
+        // and flood the licensing socket with hundreds of reports/sec.
+        int interval = client.report_interval > 0 ? client.report_interval : 60;
+        sleep(interval);
         uint64_t duration = sherpa_onnx::total_duration / 1000;
 
         // Ensure we don’t overuse the license
@@ -94,8 +99,6 @@ void BanafoLoadModel(const OnlineModelConfig &config) {
 
     if(model.getHeaderValue("free") == "false") {
       auto& banafo = BanafoLicense::getInstance(config.key, model.getHeaderValue("id"), config.referralcode);
-      pthread_t license_th;
-      int license;
 
       while(!banafo.mActivationFinished)
       {
@@ -106,8 +109,16 @@ void BanafoLoadModel(const OnlineModelConfig &config) {
       }
 
       sherpa_onnx::license_status = true;
-      license = pthread_create(&license_th, NULL, check_license, NULL);
-      pthread_detach(license);
+      // Spawn the usage-reporter thread exactly once per process.
+      // BanafoLoadModel may be invoked many times (one per recognizer);
+      // without this guard each call detached a fresh reporter thread,
+      // multiplying request rate to the licensing websocket by N.
+      static std::once_flag reporter_once;
+      std::call_once(reporter_once, []() {
+        pthread_t license_th;
+        pthread_create(&license_th, NULL, check_license, NULL);
+        pthread_detach(license_th);
+      });
 
       auto& client = LicenseState::getInstance();
     
