@@ -14,10 +14,12 @@
 #endif
 
 #include <algorithm>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <thread>
 
 #include "sherpa-onnx/csrc/file-utils.h"
 #include "sherpa-onnx/csrc/macros.h"
@@ -61,7 +63,7 @@ void* check_license(void* ptr) {
         // server, which would otherwise turn sleep(0) into a tight loop
         // and flood the licensing socket with hundreds of reports/sec.
         int interval = client.report_interval > 0 ? client.report_interval : 60;
-        sleep(interval);
+        std::this_thread::sleep_for(std::chrono::seconds(interval));
         uint64_t duration = sherpa_onnx::total_duration / 1000;
 
         // Ensure we don’t overuse the license
@@ -102,7 +104,7 @@ void BanafoLoadModel(const OnlineModelConfig &config) {
 
       while(!banafo.mActivationFinished)
       {
-        sleep(1);
+        std::this_thread::sleep_for(std::chrono::seconds(1));
       }
       if(!banafo.mActivated) {
         exit(1);
@@ -115,9 +117,7 @@ void BanafoLoadModel(const OnlineModelConfig &config) {
       // multiplying request rate to the licensing websocket by N.
       static std::once_flag reporter_once;
       std::call_once(reporter_once, []() {
-        pthread_t license_th;
-        pthread_create(&license_th, NULL, check_license, NULL);
-        pthread_detach(license_th);
+        std::thread(check_license, nullptr).detach();
       });
 
       auto& client = LicenseState::getInstance();

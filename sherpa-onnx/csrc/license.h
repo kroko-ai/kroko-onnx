@@ -251,7 +251,7 @@ public:
 
     auto& client = LicenseState::getInstance();
     while (!client.is_finish) {
-      sleep(1);
+      std::this_thread::sleep_for(std::chrono::seconds(1));
     }
     mActivated = client.allowed;
     mActivationFinished = true;
